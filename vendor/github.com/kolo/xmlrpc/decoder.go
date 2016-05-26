@@ -2,6 +2,7 @@ package xmlrpc
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -310,7 +311,18 @@ func (dec *decoder) decodeValue(val reflect.Value) error {
 				val.SetInt(i)
 			}
 		case "string", "base64":
-			str := string(data)
+			var str string
+			if typeName == "base64" {
+				decoded := make([]byte, base64.StdEncoding.DecodedLen(len(data)))
+				n, err := base64.StdEncoding.Decode(decoded, data)
+				if err != nil {
+					return err
+				}
+				str = string(decoded[0:n])
+								
+			} else {
+				str = string(data)
+			}
 			if checkType(val, reflect.Interface) == nil && val.IsNil() {
 				pstr := reflect.New(reflect.TypeOf(str)).Elem()
 				pstr.SetString(str)
