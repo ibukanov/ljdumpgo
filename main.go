@@ -877,7 +877,7 @@ func (session *ljSession) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Set login and agent headers. Doing it here also avoids
 	// https://github.com/golang/go/issues/4800
 
-	req.Header.Set("User-Agent", "ljdump-port-to-golang; igor@mir2.org")
+	req.Header.Set("User-Agent", "https://github.com/ibukanov/ljdump-go; igor@mir2.org")
 	if session.loginCookie != "" {
 		req.Header.Set("Cookie", "ljsession="+session.loginCookie)
 		req.Header.Set("X-LJ-Auth", "cookie")
