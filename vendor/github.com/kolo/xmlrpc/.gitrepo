@@ -1,0 +1,11 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/kolo/xmlrpc.git
+	branch = master
+	commit = 0826b98aaa29c0766956cb40d45cf7482a597671
+	parent = c5cefacba6d0edc63986d9e73239ed01e085e1b2
+	cmdver = 0.3.0

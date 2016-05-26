@@ -1,0 +1,11 @@
+; DO NOT EDIT (unless you know what you are doing)
+;
+; This subdirectory is a git "subrepo", and this file is maintained by the
+; git-subrepo command. See https://github.com/git-commands/git-subrepo#readme
+;
+[subrepo]
+	remote = https://github.com/hydrogen18/stalecucumber.git
+	branch = master
+	commit = 9b38526d4bdf8e197c31344777fc28f7f48d250d
+	parent = 0ba981e499c0d1f85ace52bd76706abddcfa3973
+	cmdver = 0.3.0
