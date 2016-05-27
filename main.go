@@ -1,14 +1,16 @@
 package main
 
 import (
-	"bytes"
 	"bufio"
+	"bytes"
 	"crypto/md5"
-	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	//"io"
+	"github.com/hydrogen18/stalecucumber"
+	"github.com/kolo/xmlrpc"
 	"io/ioutil"
+	"linedb"
 	"mime"
 	"net/http"
 	"net/http/httputil"
@@ -20,9 +22,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/kolo/xmlrpc"
-	"github.com/hydrogen18/stalecucumber"
 )
 
 func log(format string, a ...interface{}) {
@@ -56,8 +55,8 @@ func fuseErr(err, err2 error) error {
 }
 
 type Report struct {
-	message string
-	err error
+	message  string
+	err      error
 	combined []*Report
 }
 
@@ -97,7 +96,7 @@ func CombineReports(r1, r2 *Report) *Report {
 func (r *Report) AsText() string {
 	if r.combined != nil {
 		s := ""
-		for _, r2 := range(r.combined) {
+		for _, r2 := range r.combined {
 			s += r2.AsText()
 		}
 		return s
@@ -119,28 +118,26 @@ func writeFileTempRename(filePath string, data []byte) error {
 	return nil
 }
 
-
 const defaultConfigFile = "ljdump.config"
 
 // Use dot so it never coinside with LJ journal name
 const accountDataDirName = "account.data"
-const accountDataDBFileName = "account.json"
+const accountDataDBFileName = "account.linedb"
 
 type Config struct {
-	server string
-	username string
-	journals []string
-	password string
-	dumpDir string
+	server         string
+	username       string
+	journals       []string
+	password       string
+	dumpDir        string
 	accountDataDir string
 }
 
 type StoredConfig struct {
-	Server string `xml:"server"`
-	Username string `xml:"username"`
+	Server   string   `xml:"server"`
+	Username string   `xml:"username"`
 	Journals []string `xml:"journal"`
-	Password *string `xml:"password"`
-	PasswordFile *string `xml:"passwordFile"`
+	Password string   `xml:"password"`
 }
 
 func loadConfig() (*Config, *Report) {
@@ -149,7 +146,7 @@ func loadConfig() (*Config, *Report) {
 	if configFile == "" {
 		configFile = defaultConfigFile
 	}
-	
+
 	configBytes, err := ioutil.ReadFile(configFile)
 	if err != nil {
 		return nil, WrapErr(err, "failed to read %s", defaultConfigFile)
@@ -164,11 +161,11 @@ func loadConfig() (*Config, *Report) {
 
 	const urlCompabilitySuffix = "/interface/xmlrpc"
 	if strings.HasSuffix(storedConfig.Server, urlCompabilitySuffix) {
-		storedConfig.Server = storedConfig.Server[0 : len(storedConfig.Server) - len(urlCompabilitySuffix)]
+		storedConfig.Server = storedConfig.Server[0 : len(storedConfig.Server)-len(urlCompabilitySuffix)]
 	}
 	if storedConfig.Server == "" {
 		return nil, ReportMsg("server is empty string")
-	}	
+	}
 	config.server = storedConfig.Server
 
 	if storedConfig.Username == "" {
@@ -177,65 +174,67 @@ func loadConfig() (*Config, *Report) {
 	config.username = storedConfig.Username
 
 	if len(storedConfig.Journals) == 0 {
-		config.journals = []string { config.username }
+		config.journals = []string{config.username}
 	} else {
-		for i, journal := range(storedConfig.Journals) {
+		for i, journal := range storedConfig.Journals {
 			if journal == "" {
-				return nil, ReportMsg("journal %d is empty string", i + 1)
+				return nil, ReportMsg("journal %d is empty string", i+1)
 			}
 		}
 		config.journals = storedConfig.Journals
 	}
 
-	if storedConfig.Password != nil {
-		config.password = *storedConfig.Password
-	} else if storedConfig.PasswordFile != nil {
-		var file = *storedConfig.PasswordFile
+	if storedConfig.Password != "" {
+		config.password = storedConfig.Password
+	} else if passwordFile := os.Getenv("LJDUMP_PASSWORD_FILE"); passwordFile != "" {
 		var passwordBytes []byte
-		if file == "-" {
+		if passwordFile == "-" {
 			log("reading password from stdin (on tty it is echoed)")
 			passwordBytes, err = ioutil.ReadAll(os.Stdin)
 			if err != nil {
 				return nil, WrapErr(err, "failed to read password from stdin")
 			}
 		} else {
-			passwordBytes, err = ioutil.ReadFile(file)
+			passwordBytes, err = ioutil.ReadFile(passwordFile)
 			if err != nil {
-				return nil, WrapErr(err, "failed to read password from %s", file)
+				return nil, WrapErr(err, "failed to read password from %s", passwordFile)
 			}
 		}
 		config.password = strings.TrimRight(string(passwordBytes), "\r\n")
 	} else {
-		return nil, ReportMsg("one of password or passwordFile must be given")
+		return nil, ReportMsg(
+			"%s is without <password> and LJDUMP_PASSWORD_FILE environmnet variable is not specified",
+			configFile,
+		)
 	}
 
 	config.dumpDir = "."
 	config.accountDataDir = filepath.Join(config.dumpDir, accountDataDirName)
-	
+
 	return config, nil
 }
 
-type JournalContext struct {
-    config *Config
-	session *ljSession
-	name string
-	dir string
-	db JournalDB
-	shouldWriteDB bool
+type journalContext struct {
+	config         *Config
+	session        *ljSession
+	name           string
+	dir            string
+	db             journalDB
+	shouldWriteDB  bool
 	origDbLastSync string
-	newEntries int
-	newComments int
+	newEntries     int
+	newComments    int
 }
 
-const journalDBFileName = "db.json"
+const journalDBFileName = "journal.linedb"
 
-func NewJournalContext(session *ljSession, journalName string) *JournalContext {
+func newJournalContext(session *ljSession, journalName string) *journalContext {
 	dir := filepath.Join(session.config.dumpDir, journalName)
-	jcx := &JournalContext{
-		config: session.config,
+	jcx := &journalContext{
+		config:  session.config,
 		session: session,
-		name: journalName,
-		dir: dir,
+		name:    journalName,
+		dir:     dir,
 	}
 	return jcx
 }
@@ -243,78 +242,29 @@ func NewJournalContext(session *ljSession, journalName string) *JournalContext {
 type CommentId int64
 type UserId int64
 
-type CommentMeta struct {
+type commentMeta struct {
 	posterId UserId
-	state string
+	state    string
 }
 
 type accountData struct {
-	fileCounter int
-	pictureDefaultUrl string
-	pictureUrlFileMap map[string]string
+	fileCounter          int
+	pictureDefaultUrl    string
+	pictureUrlFileMap    map[string]string
 	pictureKeywordUrlMap map[string]string
 }
 
-type storedAccountData struct {
-	
-	FileCounter int `json:"fileCounter"`
-
-	PictureDefaultUrl string `json:"pictureDefaultUrl"`
-	
-	// Store user info map as separated arrays for compactness and sorted order
-	PictureUrlFileMap struct {
-		Url []string `json:"url"`
-		Filename []string `json:"filename"`
-	} `json:"pictureUrlFileMap"`
-
-	PictureKeywordUrlMap struct {
-		Keyword []string `json:"keyword"`
-		Url []string `json:"url"`
-	} `json:"pictureKeywordUrlMap"`
+type journalDB struct {
+	lastSync   string
+	userMap    map[UserId]string
+	commentMap map[CommentId]commentMeta
 }
 
-type JournalDB struct {
-	lastSync string
-	userMap map[UserId]string
-	commentMap map[CommentId]CommentMeta
-}
+type sortIds []int64
 
-
-type StoredJournalDB struct {
-	LastSync string `json:"lastSync"`
-	
-	// Store user info map as separated arrays for compactness and stable order
-	Users struct {
-		Id []UserId `json:"id"`
-		User []string `json:"user"`
-	} `json:"users"`
-
-	// Store comments map as separated arrays for compactness and stable order
-	CommentMeta struct {
-		Id []CommentId `json:"id"`
-		PosterId []UserId `json:"posterid"`
-		State []string `json:"state"`
-	} `json:"commentMeta"`
-}
-
-type SortUsersById struct { *StoredJournalDB }
-
-func (a SortUsersById) Len() int { return len(a.Users.Id) }
-func (a SortUsersById) Less(i, j int) bool { return a.Users.Id[i] < a.Users.Id[j] }
-func (a SortUsersById) Swap(i, j int) {
-	a.Users.Id[i], a.Users.Id[j] = a.Users.Id[j], a.Users.Id[i]
-	a.Users.User[i], a.Users.User[j] = a.Users.User[j], a.Users.User[i]
-}
-
-type SortCommentMeta struct { *StoredJournalDB }
-
-func (a SortCommentMeta) Len() int { return len(a.CommentMeta.Id) }
-func (a SortCommentMeta) Less(i, j int) bool { return a.CommentMeta.Id[i] < a.CommentMeta.Id[j] }
-func (a SortCommentMeta) Swap(i, j int) {
-	a.CommentMeta.Id[i], a.CommentMeta.Id[j] = a.CommentMeta.Id[j], a.CommentMeta.Id[i]
-	a.CommentMeta.PosterId[i], a.CommentMeta.PosterId[j] = a.CommentMeta.PosterId[j], a.CommentMeta.PosterId[i]
-	a.CommentMeta.State[i], a.CommentMeta.State[j] = a.CommentMeta.State[j], a.CommentMeta.State[i]
-}
+func (a sortIds) Len() int { return len(a) }
+func (a sortIds) Less(i, j int) bool { return a[i] < a[j] }
+func (a sortIds) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 
 func parseUserId(idstr string) (UserId, error) {
 	if idstr == "" {
@@ -327,51 +277,34 @@ func parseUserId(idstr string) (UserId, error) {
 	return UserId(id), err
 }
 
-func getSortedMapKeyValueArrays(m map[string]string) (keys []string, values []string) {
-	keyValues := make([]string, len(m) * 2)
-	keys = keyValues[ : len(m)]
-	values = keyValues[len(m) : ]
+func addSortedMapKeyValue(e *linedb.Encoder, tableName string, m map[string]string) {
+	keys := make([]string, len(m))
 	i := 0
-	for key := range(m) {
+	for key := range m {
 		keys[i] = key
 		i++
 	}
 	sort.Strings(keys)
-	for i, key := range(keys) {
-		values[i] = m[key]
+	e.Table(tableName)
+	for _, key := range keys {
+		e.AddString(key).AddString(m[key]).EndRow()
 	}
-	return
-}
-
-func getMapFromKeyValueArrays(keys []string, values []string) (map[string]string, *Report) {
-	if len(keys) != len(values) {
-		return nil, ReportMsg("map key and value array have different length, %d != %d", len(keys), len(values))
-	}
-	m := make(map[string]string, len(keys))
-	for i, key := range(keys) {
-		m[key] = values[i]
-	}
-	return m, nil
+	e.EndTable()
 }
 
 func writeAccountData(accountData *accountData, config *Config) *Report {
-	var store storedAccountData
-	store.FileCounter = accountData.fileCounter
-	store.PictureDefaultUrl = accountData.pictureDefaultUrl
-	
-	store.PictureUrlFileMap.Url, store.PictureUrlFileMap.Filename =
-		getSortedMapKeyValueArrays(accountData.pictureUrlFileMap)
-
-	store.PictureKeywordUrlMap.Keyword, store.PictureKeywordUrlMap.Url =
-		getSortedMapKeyValueArrays(accountData.pictureKeywordUrlMap)
-
-	data, err := json.Marshal(&store)
-	if err != nil {
-		panic(err)
-	}
+	e := linedb.NewByteEncoder()
+	e.Scalar("fileCounter").AddInt(accountData.fileCounter)
+	e.Scalar("pictureDefaultUrl").AddString(accountData.pictureDefaultUrl)
+	e.EmptyLine()
+	e.Comment("map from url to filename")
+	addSortedMapKeyValue(e, "pictureUrlFileMap", accountData.pictureUrlFileMap)
+	e.EmptyLine()
+	e.Comment("map from picture-keyword to picture-url")
+	addSortedMapKeyValue(e, "pictureKeywordUrlMap", accountData.pictureKeywordUrlMap)
 
 	dbpath := filepath.Join(config.accountDataDir, accountDataDBFileName)
-	if err := writeFileTempRename(dbpath, data); err != nil {
+	if err := writeFileTempRename(dbpath, e.GetBytes()); err != nil {
 		return WrapErr(err, "failed to write account data db file %s", dbpath)
 	}
 	return nil
@@ -379,84 +312,86 @@ func writeAccountData(accountData *accountData, config *Config) *Report {
 
 func readAccountData(config *Config) (*accountData, *Report) {
 	accountData := &accountData{}
+
+	// Initialize maps so entries can be added
+	accountData.pictureUrlFileMap = make(map[string]string)
+	accountData.pictureKeywordUrlMap = make(map[string]string)
+
 	dbpath := filepath.Join(config.accountDataDir, accountDataDBFileName)
 	dbdata, err := ioutil.ReadFile(dbpath)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return nil, WrapErr(err, "")
 		}
-		// Initialize maps so entries can be added
-		accountData.pictureUrlFileMap = make(map[string]string)
-		accountData.pictureKeywordUrlMap = make(map[string]string)
 		return accountData, nil
 	}
-	var store storedAccountData
-	if err := json.Unmarshal(dbdata, &store); err != nil {
-		return nil, WrapErr(err, "error while parsing account data db %s as JSON data", dbpath)
-	}
-	accountData.fileCounter = store.FileCounter
-	accountData.pictureDefaultUrl = store.PictureDefaultUrl
 
-	var r *Report
-	accountData.pictureUrlFileMap, r = getMapFromKeyValueArrays(
-		store.PictureUrlFileMap.Url,
-		store.PictureUrlFileMap.Filename,
-	)
-	if r != nil {
-		return nil, r
+	d := linedb.NewByteDecoder(dbdata)
+	for d.NextItem() {
+		switch d.ItemKind {
+		case linedb.ScalarItem:
+			switch d.ItemName {
+			case "fileCounter":
+				accountData.fileCounter = d.GetInt()
+			case "pictureDefaultUrl":
+				accountData.pictureDefaultUrl = d.GetString()
+			}
+		case linedb.TableItem:
+			for d.NextRow() {
+				switch d.ItemName {
+				case "pictureUrlFileMap":
+					accountData.pictureUrlFileMap[d.GetString()] = d.GetString()
+				case "pictureKeywordUrlMap":
+					accountData.pictureKeywordUrlMap[d.GetString()] = d.GetString()
+				}
+			}
+		}
 	}
-	accountData.pictureKeywordUrlMap, r = getMapFromKeyValueArrays(
-		store.PictureKeywordUrlMap.Keyword,
-		store.PictureKeywordUrlMap.Url,
-	)
-	if r != nil {
-		return nil, r
+	if err := d.GetError(); err != nil {
+		return nil, WrapErr(err, "error while parsing account data file %s as linedb", dbpath)
 	}
 	return accountData, nil
 }
 
+func writeJournalDB(jcx *journalContext) *Report {
+	e := linedb.NewByteEncoder()
+	e.Scalar("lastSync").AddString(jcx.db.lastSync)
 
-func writeJournalDB(jcx *JournalContext) *Report {
-	var store StoredJournalDB
-	store.LastSync = jcx.db.lastSync
-
-	store.Users.Id = make([]UserId, len(jcx.db.userMap))
-	store.Users.User = make([]string, len(jcx.db.userMap))
+	e.EmptyLine()
+	e.Comment("map from user-id to user-name")
+	userIds := make(sortIds, 0, len(jcx.db.userMap))
+	for userId := range jcx.db.userMap {
+		userIds = append(userIds, int64(userId))
+	}
+	sort.Sort(userIds)
+	e.Table("users")
+	for _, userId := range userIds {
+		e.AddInt64(userId).AddString(jcx.db.userMap[UserId(userId)]).EndRow()
+	}
+	e.EndTable()
 	
-	var i = 0
-	for userId, user := range(jcx.db.userMap) {
-		store.Users.Id[i] = userId
-		store.Users.User[i] = user
-		i++
+	e.EmptyLine()
+	e.Comment("map from comment-id to (poster-id state)")
+	commentIds := make(sortIds, 0, len(jcx.db.commentMap))
+	for commentId := range(jcx.db.commentMap) {
+		commentIds = append(commentIds, int64(commentId))
 	}
-	sort.Stable(SortUsersById{&store})
-
-	store.CommentMeta.Id = make([]CommentId, len(jcx.db.commentMap))
-	store.CommentMeta.PosterId = make([]UserId, len(jcx.db.commentMap))
-	store.CommentMeta.State = make([]string, len(jcx.db.commentMap))
+	sort.Sort(commentIds)
+	e.Table("commentMeta")
+	for _, commentId := range commentIds {
+		commentMeta := jcx.db.commentMap[CommentId(commentId)]
+		e.AddInt64(commentId).AddInt64(int64(commentMeta.posterId)).AddString(commentMeta.state).EndRow()
+	}
+	e.EndTable()
 	
-	i = 0
-	for id, value := range(jcx.db.commentMap) {
-		store.CommentMeta.Id[i] = id
-		store.CommentMeta.PosterId[i] = value.posterId
-		store.CommentMeta.State[i] = value.state
-		i++
-	}
-	sort.Stable(SortCommentMeta{&store})
-
-	data, err := json.Marshal(&store)
-	if err != nil {
-		panic(err)
-	}
-
 	var dbpath = filepath.Join(jcx.dir, journalDBFileName)
-	if err := writeFileTempRename(dbpath, data); err != nil {
+	if err := writeFileTempRename(dbpath, e.GetBytes()); err != nil {
 		return WrapErr(err, "failed to write journal db file %s", dbpath)
 	}
 	return nil
 }
 
-func readJournalDB(jcx *JournalContext) *Report {
+func readJournalDB(jcx *journalContext) *Report {
 	var dbpath = filepath.Join(jcx.dir, journalDBFileName)
 	dbdata, err := ioutil.ReadFile(dbpath)
 	if err != nil {
@@ -480,37 +415,29 @@ func readJournalDB(jcx *JournalContext) *Report {
 			return r
 		}
 	} else {
-		var store StoredJournalDB
-		err = json.Unmarshal(dbdata, &store)
-		if err != nil {
-			return WrapErr(err, "error while parsing journal db %s as JSON data", dbpath)
-		}
-		if len(store.Users.User) != len(store.Users.Id) {
-			return ReportMsg("length mismatch between users.user(%d) and user.id(%d) in %s",
-				len(store.Users.User), len(store.Users.Id), dbpath)
-		}
-		if len(store.CommentMeta.PosterId) != len(store.CommentMeta.Id) {
-			return ReportMsg("length mismatch between commentMeta.posterId(%d) and commentMeta.Id(%d) in %s",
-				len(store.CommentMeta.PosterId), len(store.CommentMeta.Id), dbpath)
-		}
-		if len(store.CommentMeta.State) != len(store.CommentMeta.Id) {
-			return ReportMsg("length mismatch between commentMeta.stats(%d) and commentMeta.Id(%d) in %s",
-				len(store.CommentMeta.State), len(store.CommentMeta.Id), dbpath)
-		}
-
-		jcx.db.lastSync = store.LastSync
-
-		jcx.db.userMap = make(map[UserId]string, len(store.Users.Id))
-		for i := range(store.Users.Id) {
-			jcx.db.userMap[store.Users.Id[i]] = store.Users.User[i]
-		}
-
-		jcx.db.commentMap = make(map[CommentId]CommentMeta, len(store.CommentMeta.Id))
-		for i := range(store.CommentMeta.Id) {
-			var commentId = store.CommentMeta.Id[i]
-			jcx.db.commentMap[commentId] = CommentMeta{
-				store.CommentMeta.PosterId[i],
-				store.CommentMeta.State[i],
+		jcx.db.userMap = make(map[UserId]string)
+		jcx.db.commentMap = make(map[CommentId]commentMeta)
+		
+		d := linedb.NewByteDecoder(dbdata)
+		for d.NextItem() {
+			switch d.ItemKind {
+			case linedb.ScalarItem:
+				switch d.ItemName {
+				case "lastSync":
+					jcx.db.lastSync = d.GetString()
+				}
+			case linedb.TableItem:
+				for d.NextRow() {
+					switch d.ItemName {
+					case "users":
+						jcx.db.userMap[UserId(d.GetInt64())] = d.GetString()
+					case "commentMeta":
+						jcx.db.commentMap[CommentId(d.GetInt64())] = commentMeta{
+							posterId: UserId(d.GetInt64()),
+							state: d.GetString(),
+						}
+					}
+				}
 			}
 		}
 	}
@@ -518,9 +445,9 @@ func readJournalDB(jcx *JournalContext) *Report {
 	return nil
 }
 
-func readPythonLastRunFile(jcx *JournalContext) error {
+func readPythonLastRunFile(jcx *journalContext) error {
 	jcx.db.lastSync = ""
-	
+
 	var p = filepath.Join(jcx.dir, ".last")
 	var f, err = os.Open(p)
 	if err != nil {
@@ -538,8 +465,7 @@ func readPythonLastRunFile(jcx *JournalContext) error {
 	return fuseErr(s.Err(), f.Close())
 }
 
-
-func readPythonCommentMeta(jcx *JournalContext) error {
+func readPythonCommentMeta(jcx *journalContext) error {
 	var p = filepath.Join(jcx.dir, "comment.meta")
 	var file, err = os.Open(p)
 	if err != nil {
@@ -552,13 +478,13 @@ func readPythonCommentMeta(jcx *JournalContext) error {
 	var pythonData map[interface{}]interface{}
 	pythonData, err = stalecucumber.Dict(stalecucumber.Unpickle(file))
 	if err == nil {
-		jcx.db.commentMap = make(map[CommentId]CommentMeta, len(pythonData))
-		for key, value := range(pythonData) {
+		jcx.db.commentMap = make(map[CommentId]commentMeta, len(pythonData))
+		for key, value := range pythonData {
 			var idnum, keyOk = key.(int64)
 			if !keyOk {
 				err = fmt.Errorf("Unexpected key type %T in %s", key, p)
 				break
-			} 
+			}
 			var structValue, valueOk = value.(map[interface{}]interface{})
 			if !valueOk {
 				err = fmt.Errorf("Unexpected value type %T in %s", value, p)
@@ -579,15 +505,15 @@ func readPythonCommentMeta(jcx *JournalContext) error {
 			if err != nil {
 				break
 			}
-			
+
 			var id = CommentId(idnum)
-			jcx.db.commentMap[id] = CommentMeta{posterId, state}
+			jcx.db.commentMap[id] = commentMeta{posterId, state}
 		}
 	}
 	return fuseErr(err, file.Close())
 }
 
-func readPythonUserMap(jcx *JournalContext) error {
+func readPythonUserMap(jcx *journalContext) error {
 	var p = filepath.Join(jcx.dir, "user.map")
 	var file, err = os.Open(p)
 	if err != nil {
@@ -601,7 +527,7 @@ func readPythonUserMap(jcx *JournalContext) error {
 	pythonData, err = stalecucumber.DictString(stalecucumber.Unpickle(file))
 	if err == nil {
 		jcx.db.userMap = make(map[UserId]string, len(pythonData))
-		for userIdStr, userValue := range(pythonData) {
+		for userIdStr, userValue := range pythonData {
 			var user, userOk = userValue.(string)
 			if !userOk {
 				err = fmt.Errorf("Unexpected user name type %T in %s", userValue, p)
@@ -618,16 +544,16 @@ func readPythonUserMap(jcx *JournalContext) error {
 	return fuseErr(err, file.Close())
 }
 
-func writeLJEventDump(jcx *JournalContext, eventType byte, itemId int64,  event map[string]interface{}) *Report {
+func writeLJEventDump(jcx *journalContext, eventType byte, itemId int64, event map[string]interface{}) *Report {
 
 	buf := bytes.NewBufferString(xml.Header)
 	var tmparea []byte
 
-	var serializeTagValue func (tag string, v interface{}) *Report
+	var serializeTagValue func(tag string, v interface{}) *Report
 
 	// For now allow valid XML names with only ascii characters
 	isValidXmlTagName := func(s string) bool {
-		for j, c := range(s) {
+		for j, c := range s {
 			if ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z') || c == '_' {
 				continue
 			}
@@ -643,9 +569,9 @@ func writeLJEventDump(jcx *JournalContext, eventType byte, itemId int64,  event 
 
 	// xml.EscapeText escapes way too much
 	addEscapeXmlValue := func(s []byte) {
-		for _, b := range(s) {
+		for _, b := range s {
 			replace := ""
-			switch (b) {
+			switch b {
 			case '<':
 				replace = "&lt;"
 			case '>':
@@ -663,7 +589,7 @@ func writeLJEventDump(jcx *JournalContext, eventType byte, itemId int64,  event 
 	serializeMap := func(m map[string]interface{}) *Report {
 		keys := make([]string, len(m))
 		i := 0
-		for key := range(m) {
+		for key := range m {
 			if !isValidXmlTagName(key) {
 				return ReportMsg("cannot serialize map key '%s' as XML name", key)
 			}
@@ -673,10 +599,10 @@ func writeLJEventDump(jcx *JournalContext, eventType byte, itemId int64,  event 
 
 		// Ensure key order independent from the runtime presentation of map
 		sort.Strings(keys)
-		for _, key := range(keys) {
+		for _, key := range keys {
 			value := m[key]
 			if array, isArray := value.([]interface{}); isArray {
-				for _, elem := range(array) {
+				for _, elem := range array {
 					serializeTagValue(key, elem)
 				}
 			} else {
@@ -686,7 +612,7 @@ func writeLJEventDump(jcx *JournalContext, eventType byte, itemId int64,  event 
 		return nil
 	}
 
-	serializeTagValue = func (tag string, value interface{}) *Report {
+	serializeTagValue = func(tag string, value interface{}) *Report {
 		buf.WriteByte('<')
 		buf.WriteString(tag)
 		if value == nil {
@@ -732,10 +658,10 @@ func writeLJEventDump(jcx *JournalContext, eventType byte, itemId int64,  event 
 }
 
 type ljSession struct {
-	config *Config
-	client http.Client
+	config          *Config
+	client          http.Client
 	lastRequestTime time.Time
-	loginCookie string
+	loginCookie     string
 }
 
 // Get LJ session cookie,
@@ -744,11 +670,11 @@ func openLJSession(config *Config) (*ljSession, *Report) {
 	session := &ljSession{
 		config: config,
 	}
-	session.client.Transport = session	
+	session.client.Transport = session
 
 	calculateChallengeResponse := func(challenge string) string {
 		var passhash = fmt.Sprintf("%x", md5.Sum([]byte(config.password)))
-		return fmt.Sprintf("%x", md5.Sum([]byte(challenge + passhash)))
+		return fmt.Sprintf("%x", md5.Sum([]byte(challenge+passhash)))
 	}
 
 	v := url.Values{}
@@ -775,7 +701,7 @@ func openLJSession(config *Config) (*ljSession, *Report) {
 		return nil, r
 	}
 
-    session.loginCookie = responseMap["ljsession"]
+	session.loginCookie = responseMap["ljsession"]
 	if session.loginCookie == "" {
 		return nil, ReportMsg("failed to login to %s, perhaps the password was invalid", config.server)
 	}
@@ -783,7 +709,7 @@ func openLJSession(config *Config) (*ljSession, *Report) {
 }
 
 func callLJFlatInterface(session *ljSession, values url.Values) (map[string]string, *Report) {
-	posturl := session.config.server + "/interface/flat"	
+	posturl := session.config.server + "/interface/flat"
 	resp, err := session.client.PostForm(posturl, values)
 	if err != nil {
 		return nil, WrapErr(err, "")
@@ -838,14 +764,14 @@ func callLJFlatMathod(
 	v.Set("ver", "1")
 	v.Set("user", session.config.username)
 	v.Set("auth_method", "cookie")
-	for i := 0; i != len(nameValuePairs); i+=2 {
-		v.Set(nameValuePairs[i], nameValuePairs[i + 1])
+	for i := 0; i != len(nameValuePairs); i += 2 {
+		v.Set(nameValuePairs[i], nameValuePairs[i+1])
 	}
 	return callLJFlatInterface(session, v)
 }
 
 func getLJFlatArray(arrayName string, m map[string]string) ([]string, *Report) {
-	key := arrayName+"_count"
+	key := arrayName + "_count"
 	countStr := m[key]
 	if countStr == "" {
 		return nil, ReportMsg("no %s key in LJ flat response", key)
@@ -859,7 +785,7 @@ func getLJFlatArray(arrayName string, m map[string]string) ([]string, *Report) {
 	}
 	a := make([]string, count)
 	for i := 0; i < count; i++ {
-		key = fmt.Sprintf("%s_%d", arrayName, i + 1)
+		key = fmt.Sprintf("%s_%d", arrayName, i+1)
 		value, present := m[key]
 		if !present {
 			return nil, ReportMsg("no %s key in LJ flat response", key)
@@ -898,13 +824,13 @@ func (session *ljSession) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 	session.lastRequestTime = newRequestTime
-		
+
 	res, err := http.DefaultTransport.RoundTrip(req)
 	if false {
 		s, _ := httputil.DumpResponse(res, true)
 		fmt.Println(string(s))
 	}
-	
+
 	return res, err
 }
 
@@ -915,7 +841,7 @@ func convertPictureKeywordToFilename(keyword string) string {
 	return blacklistedPictureFilenameChars.ReplaceAllString(keyword, "_")
 }
 
-func dumpAccountData(session *ljSession) *Report {
+func dumpAccountData(session *ljSession, accountData *accountData) *Report {
 
 	log("Fetching user info for: %s", session.config.username)
 
@@ -923,12 +849,8 @@ func dumpAccountData(session *ljSession) *Report {
 		return WrapErr(err, "failed to create directory for account data %s", session.config.accountDataDir)
 	}
 
-	accountData, r := readAccountData(session.config)
-	if r != nil {
-		return r
-	}
 	updated := false
-	
+
 	responseMap, r := callLJFlatMathod(
 		"login", session,
 		"getpickws", "1",
@@ -938,7 +860,7 @@ func dumpAccountData(session *ljSession) *Report {
 		return r
 	}
 	keywordArrayName, urlsArrayName := "pickw", "pickwurl"
-	
+
 	keywords, r := getLJFlatArray(keywordArrayName, responseMap)
 	if r != nil {
 		return r
@@ -959,9 +881,9 @@ func dumpAccountData(session *ljSession) *Report {
 
 		// Fetch only unknown URLS
 		if url == "" || accountData.pictureUrlFileMap[url] != "" {
-			return nil 
+			return nil
 		}
-		
+
 		keyword := ""
 		if keywordIndex >= 0 {
 			keyword = keywords[keywordIndex]
@@ -975,7 +897,7 @@ func dumpAccountData(session *ljSession) *Report {
 		} else {
 			log("Fetching new '%s' user picture %s", keyword, url)
 		}
-		
+
 		// Use default client, not a custom, to avoid appliing cookie etc headers.
 		// Also ignore any download-related errors
 		res, err := http.Get(url)
@@ -1001,18 +923,20 @@ func dumpAccountData(session *ljSession) *Report {
 					fileName = convertPictureKeywordToFilename(keyword)
 				}
 				accountData.fileCounter++
-				picturePath := filepath.Join(session.config.accountDataDir, fmt.Sprintf(
-					"user-picture-%d%s%s%s", accountData.fileCounter, separator, fileName, extension,
-				))
+				pictureFile := fmt.Sprintf(
+					"user-picture-%d%s%s%s",
+					accountData.fileCounter, separator, fileName, extension,
+				)
+				picturePath := filepath.Join(session.config.accountDataDir, pictureFile)
 				if err := writeFileTempRename(picturePath, data); err != nil {
 					return WrapErr(err, "")
 				}
-				accountData.pictureUrlFileMap[url] = picturePath
+				accountData.pictureUrlFileMap[url] = pictureFile
 				if keyword == "" {
 					accountData.pictureDefaultUrl = url
 				} else {
 					accountData.pictureKeywordUrlMap[keyword] = url
-					
+
 				}
 				updated = true
 			}
@@ -1026,7 +950,7 @@ func dumpAccountData(session *ljSession) *Report {
 	if r := fetchAnsStorePictureUrl(-1, responseMap["defaultpicurl"]); r != nil {
 		return r
 	}
-	for i, url := range(urls) {
+	for i, url := range urls {
 		if r := fetchAnsStorePictureUrl(i, url); r != nil {
 			return r
 		}
@@ -1037,47 +961,47 @@ func dumpAccountData(session *ljSession) *Report {
 			return r
 		}
 	}
-	
+
 	return nil
 }
 
-func dumpJournalPosts(jcx *JournalContext) *Report {
+func dumpJournalPosts(jcx *journalContext) *Report {
 
 	log("Fetching journal entries for: %s", jcx.name)
 
 	type LJLoginResult struct {
-		Pickws []string `xmlrpc:"pickws"`
-		Pickwurls []string `xmlrpc:"pickwurls"`
-		Defaultpicurl string `xmlrpc:"defaultpicurl"`
+		Pickws        []string `xmlrpc:"pickws"`
+		Pickwurls     []string `xmlrpc:"pickwurls"`
+		Defaultpicurl string   `xmlrpc:"defaultpicurl"`
 	}
-	
+
 	type LJSyncItem struct {
-		Item string `xmlrpc:"item"`
+		Item   string `xmlrpc:"item"`
 		Action string `xmlrpc:"action"`
-		Time string `xmlrpc:"time"`
+		Time   string `xmlrpc:"time"`
 	}
-	
+
 	type LJSyncItemsResult struct {
 		SyncItems []LJSyncItem `xmlrpc:"syncitems"`
 	}
 
 	/*
-	type LJEvent struct {
-		ItemId int64 `xmlrpc:"itemid"`
-		EventTime string `xmlrpc:"eventtime"`
-		Security string `xmlrpc:"security"`
-		AllowMask string `xmlrpc:"allowmask"`
-		Subject string `xmlrpc:"subject"`
-		Event string `xmlrpc:"event"`
-		Anum string `xmlrpc:"anum"`
-		Url string `xmlrpc:"url"`
-		Poster string `xmlrpc:"poster"`
-		Props []LJProp `xmlrpc:"props"`
-	}
-    */
+		type LJEvent struct {
+			ItemId int64 `xmlrpc:"itemid"`
+			EventTime string `xmlrpc:"eventtime"`
+			Security string `xmlrpc:"security"`
+			AllowMask string `xmlrpc:"allowmask"`
+			Subject string `xmlrpc:"subject"`
+			Event string `xmlrpc:"event"`
+			Anum string `xmlrpc:"anum"`
+			Url string `xmlrpc:"url"`
+			Poster string `xmlrpc:"poster"`
+			Props []LJProp `xmlrpc:"props"`
+		}
+	*/
 
 	type LJEvent map[string]interface{}
-	
+
 	type LJGeteventsResult struct {
 		Events []LJEvent `xmlrpc:"events"`
 	}
@@ -1090,13 +1014,13 @@ func dumpJournalPosts(jcx *JournalContext) *Report {
 		return WrapErr(err, "")
 	}
 	defer client.Close()
-	
+
 	callWithLogin := func(method string, input map[string]interface{}, result interface{}) *Report {
 		input["username"] = jcx.config.username
 		input["ver"] = 1
 		input["auth_method"] = "cookie"
-		
-		err := client.Call("LJ.XMLRPC." + method, input, result)
+
+		err := client.Call("LJ.XMLRPC."+method, input, result)
 		if err != nil {
 			return WrapErr(err, "")
 		}
@@ -1105,15 +1029,15 @@ func dumpJournalPosts(jcx *JournalContext) *Report {
 
 	for {
 		var syncItemsParams = map[string]interface{}{
-			"lastsync": jcx.db.lastSync,
+			"lastsync":   jcx.db.lastSync,
 			"usejournal": jcx.name,
 		}
 		var syncItemsResult LJSyncItemsResult
 		if r := callWithLogin("syncitems", syncItemsParams, &syncItemsResult); r != nil {
 			return r
 		}
-        if len(syncItemsResult.SyncItems) == 0 {
-            break
+		if len(syncItemsResult.SyncItems) == 0 {
+			break
 		}
 
 		// Use slow fetch one-by-one loop as bulk retrival of events
@@ -1122,7 +1046,7 @@ func dumpJournalPosts(jcx *JournalContext) *Report {
 		// http://www.livejournal.com/doc/server/ljp.csp.xml-rpc.getevents.html
 		// is very unclear.
 
-		for _, item := range(syncItemsResult.SyncItems) {
+		for _, item := range syncItemsResult.SyncItems {
 			// check that Item is in TypeLetter-Number format as we use that as a file path.
 			if len(item.Item) < 3 || item.Item[1] != '-' {
 				log("WARNING: invalid SyncItems id %s", item.Item[1])
@@ -1133,13 +1057,13 @@ func dumpJournalPosts(jcx *JournalContext) *Report {
 				log("WARNING: invalid SyncItems id %s", item.Item[1])
 				continue
 			}
-            if item.Item[0] == 'L' {
-                log("Fetching journal entry %s (%s)", item.Item, item.Action)
+			if item.Item[0] == 'L' {
+				log("Fetching journal entry %s (%s)", item.Item, item.Action)
 
 				var geteventsParams = map[string]interface{}{
-					"selecttype": "one",
-					"itemid": itemid,
-					"usejournal": jcx.name,
+					"selecttype":  "one",
+					"itemid":      itemid,
+					"usejournal":  jcx.name,
 					"lineendings": "unix",
 				}
 				var geteventsResult LJGeteventsResult
@@ -1154,7 +1078,7 @@ func dumpJournalPosts(jcx *JournalContext) *Report {
 				}
 				jcx.newEntries++
 			}
-            jcx.db.lastSync = item.Time
+			jcx.db.lastSync = item.Time
 			jcx.shouldWriteDB = true
 		}
 	}
@@ -1162,72 +1086,72 @@ func dumpJournalPosts(jcx *JournalContext) *Report {
 }
 
 // See http://www.livejournal.com/doc/server/ljp.csp.export_comments.html
-func dumpJournalComments(jcx *JournalContext) *Report {
-    log("Fetching journal comments for: %s", jcx.name)
+func dumpJournalComments(jcx *journalContext) *Report {
+	log("Fetching journal comments for: %s", jcx.name)
 
 	var authas = ""
-    if jcx.config.username != jcx.name {
-        authas = fmt.Sprintf("&authas=%s", url.QueryEscape(jcx.name))
+	if jcx.config.username != jcx.name {
+		authas = fmt.Sprintf("&authas=%s", url.QueryEscape(jcx.name))
 	}
 
 	type LJCommentMeta struct {
-		Id CommentId `xml:"id,attr"`
-		PosterId UserId `xml:"posterid,attr"`		
-		State string `xml:"state,attr"`
+		Id       CommentId `xml:"id,attr"`
+		PosterId UserId    `xml:"posterid,attr"`
+		State    string    `xml:"state,attr"`
 	}
 
 	type LJComment struct {
-		Id CommentId `xml:"id,attr"`
-		PosterId UserId `xml:"posterid,attr"`		
-		State string `xml:"state,attr"`
-		JItemId int64 `xml:"jitemid,attr"`
+		Id       CommentId `xml:"id,attr"`
+		PosterId UserId    `xml:"posterid,attr"`
+		State    string    `xml:"state,attr"`
+		JItemId  int64     `xml:"jitemid,attr"`
 
 		// Use string, not CommentId, as this can be empty
 		ParentId string `xml:"parentid,attr"`
-		Subject string `xml:"subject"`
-		Body string `xml:"body"`
-		Date string `xml:"date"`
+		Subject  string `xml:"subject"`
+		Body     string `xml:"body"`
+		Date     string `xml:"date"`
 	}
 
 	type LJUserMap struct {
-		Id UserId `xml:"id,attr"`
+		Id   UserId `xml:"id,attr"`
 		User string `xml:"user,attr"`
 	}
 
 	type LJCommentMetaChunk struct {
-		XMLName xml.Name `xml:"livejournal"`
-		MaxId CommentId `xml:"maxid"`
+		XMLName  xml.Name        `xml:"livejournal"`
+		MaxId    CommentId       `xml:"maxid"`
 		Comments []LJCommentMeta `xml:"comments>comment"`
-		UserMaps []LJUserMap `xml:"usermaps>usermap"`
+		UserMaps []LJUserMap     `xml:"usermaps>usermap"`
 	}
 
 	type LJCommentChunk struct {
-		XMLName xml.Name `xml:"livejournal"`
+		XMLName  xml.Name    `xml:"livejournal"`
 		Comments []LJComment `xml:"comments>comment"`
 	}
 
 	type CommentRecord struct {
-		Id CommentId `xml:"id"`
-		State string `xml:"state"`
-		User string `xml:"user"`
+		Id    CommentId `xml:"id"`
+		State string    `xml:"state"`
+		User  string    `xml:"user"`
 
 		// Use string, not CommentId, as this can be empty
 		ParentId string `xml:"parentid"`
-		Date string `xml:"date"`
-		Subject string `xml:"subject"`
-		Body string `xml:"body"`
+		Date     string `xml:"date"`
+		Subject  string `xml:"subject"`
+		Body     string `xml:"body"`
 	}
 
 	type CommentFile struct {
-		XMLName xml.Name `xml:"comments"`
+		XMLName  xml.Name        `xml:"comments"`
 		Comments []CommentRecord `xml:"comment"`
 	}
 
-	newComments := make(map[CommentId]CommentMeta)
+	newComments := make(map[CommentId]commentMeta)
 	newCommentUsers := make(map[UserId]string)
 
 	var maxStoredCommentId CommentId = -1
-	for id := range(jcx.db.commentMap) {
+	for id := range jcx.db.commentMap {
 		if maxStoredCommentId < id {
 			maxStoredCommentId = id
 		}
@@ -1236,13 +1160,13 @@ func dumpJournalComments(jcx *JournalContext) *Report {
 	// TODO Check if we have some missing comments and downloads those
 	// as well rather than assuming that we have everything betwen 1
 	// and maxStoredCommentId.
-	
+
 	fetchCommentData := func(kind string, maxid CommentId, v interface{}) *Report {
 		geturl := fmt.Sprintf(
 			"%s/export_comments.bml?get=comment_%s&startid=%d%s",
 			jcx.config.server,
 			kind,
-			maxid + 1,
+			maxid+1,
 			authas,
 		)
 		resp, err := jcx.session.client.Get(geturl)
@@ -1269,14 +1193,14 @@ func dumpJournalComments(jcx *JournalContext) *Report {
 			return r
 		}
 
-		for i := range(metaChunk.Comments) {
+		for i := range metaChunk.Comments {
 			c := &metaChunk.Comments[i]
-			newComments[c.Id] = CommentMeta{posterId: c.PosterId, state: c.State}
+			newComments[c.Id] = commentMeta{posterId: c.PosterId, state: c.State}
 			if newMaxId < c.Id {
 				newMaxId = c.Id
 			}
 		}
-		for _, u := range(metaChunk.UserMaps) {
+		for _, u := range metaChunk.UserMaps {
 			newCommentUsers[u.Id] = u.User
 		}
 		if newMaxId >= metaChunk.MaxId {
@@ -1292,15 +1216,15 @@ func dumpJournalComments(jcx *JournalContext) *Report {
 			return r
 		}
 
-		for i := range(chunk.Comments) {
+		for i := range chunk.Comments {
 			c := &chunk.Comments[i]
-			var record = CommentRecord {
-				Id: c.Id,
+			var record = CommentRecord{
+				Id:       c.Id,
 				ParentId: c.ParentId,
-				Subject: c.Subject,
-				Date: c.Date,
-				Body: c.Body,
-				State: c.State,
+				Subject:  c.Subject,
+				Date:     c.Date,
+				Body:     c.Body,
+				State:    c.State,
 			}
 			if record.State == "" {
 				if commentMeta, present := newComments[c.Id]; present {
@@ -1336,7 +1260,7 @@ func dumpJournalComments(jcx *JournalContext) *Report {
 			}
 			foundDup := false
 			shouldStore := true
-			for i := range(stored.Comments) {
+			for i := range stored.Comments {
 				if stored.Comments[i].Id == record.Id {
 					if stored.Comments[i] == record {
 						log("comment id %d was already downloaded in %s",
@@ -1376,10 +1300,10 @@ func dumpJournalComments(jcx *JournalContext) *Report {
 
 	if len(newComments) != 0 || len(newCommentUsers) != 0 {
 		// We succsefully downloaded new comments, update the meta now
-		for commentId, commentMeta := range(newComments) {
+		for commentId, commentMeta := range newComments {
 			jcx.db.commentMap[commentId] = commentMeta
 		}
-		for userId, user := range(newCommentUsers) {
+		for userId, user := range newCommentUsers {
 			jcx.db.userMap[userId] = user
 		}
 		jcx.shouldWriteDB = true
@@ -1387,7 +1311,7 @@ func dumpJournalComments(jcx *JournalContext) *Report {
 	return nil
 }
 
-func dumpJournal(jcx *JournalContext) *Report {
+func dumpJournal(jcx *journalContext) *Report {
 	if r := readJournalDB(jcx); r != nil {
 		return r
 	}
@@ -1396,7 +1320,7 @@ func dumpJournal(jcx *JournalContext) *Report {
 		return WrapErr(err, "failed to create directory for journal %s", jcx.dir)
 	}
 
-	r := dumpJournalPosts(jcx) 
+	r := dumpJournalPosts(jcx)
 	if r == nil {
 		r = dumpJournalComments(jcx)
 	}
@@ -1418,23 +1342,28 @@ func mainImpl() *Report {
 	if r != nil {
 		return r
 	}
+
+	accountData, r := readAccountData(config)
+	if r != nil {
+		return r
+	}
+
 	session, r := openLJSession(config)
 	if r != nil {
 		return r
 	}
 
-	if r := dumpAccountData(session); r != nil {
+	if r := dumpAccountData(session, accountData); r != nil {
 		return r
 	}
-	
-	for _, journal := range(config.journals) {
-		if r := dumpJournal(NewJournalContext(session, journal)); r != nil {
+
+	for _, journal := range config.journals {
+		if r := dumpJournal(newJournalContext(session, journal)); r != nil {
 			return r
 		}
 	}
 	return nil
 }
-
 
 func main() {
 
