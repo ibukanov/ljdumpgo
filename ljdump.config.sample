@@ -1,0 +1,17 @@
+<?xml version='1.0'?>
+<ljdump>
+  <server>http://livejournal.com</server>
+  
+  <!-- LiveJournal user and password -->     
+  <username>ljuser</username>
+  <password>foobar</password>
+  
+  <!--
+      List of journals to archive. If no journals are given, the
+      journal for the user will be archived. Only communities where the
+      user is a maintainer can be archived.
+  -->
+  <journal>ljuser</journal>
+  <journal>community1</journal>
+  <journal>community2</journal>
+</ljdump>
