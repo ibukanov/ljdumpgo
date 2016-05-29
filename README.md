@@ -10,6 +10,33 @@ Create a directory where to store the archive and create a config file named `lj
 
 To specify the password separately from the config file create a file with the password on its first line and then either add `<passwordFile>` to `ljdump.config` or set the environment variable `LJDUMP_PASSWORD_FILE` with the location of the password file.
 
+Alternatively, configuration can be given as command line options. Those take precedence over configuration from `ljdump.config`.
+```
+...$ ljdumpgo -h
+Usage: ljdumpgo [OPTION]...
+
+Option summary:
+  -h    shorthand for -help 
+  -help
+        print usage on stdout and exit
+  -j journal
+        shorthand for -journal journal
+  -journal journal
+        add journal to the list of journals to archive. If none are given, use LJ username
+  -p path
+        shorthand for -password-file path
+  -password-file path
+        path to file with LJ user password, use '-' to read from stdin (password will be echoed)
+  -s server
+        shorthand for -server server (default "http://livejournal.com")
+  -server server
+        LJ server (default "http://livejournal.com")
+  -u username
+        shorthand for -username username
+  -username username
+        LJ username
+```
+
 Archive of each journal is stored in the accordingly named subdirectory of the main directory. In addition userpics and their keywords are stored in the subdirectory `account.data`.
 
 ## Compilation

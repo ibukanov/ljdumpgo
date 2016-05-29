@@ -5,8 +5,8 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/xml"
+	"flag"
 	"fmt"
-	//"io"
 	"github.com/hydrogen18/stalecucumber"
 	"github.com/kolo/xmlrpc"
 	"io/ioutil"
@@ -136,32 +136,115 @@ type Config struct {
 	accountDataDir string
 }
 
+type commandOptionStringArray []string
+
+func (a *commandOptionStringArray) String() string {
+	return strings.Join(*a, " ")
+}
+
+func (a *commandOptionStringArray) Set(value string) error {
+	*a = append(*a, value)
+	return nil
+}
+
 func loadConfig() (*Config, *Report) {
 
-	var configFile = os.Getenv("LJDUMP_CONFIG")
-	if configFile == "" {
-		configFile = defaultConfigFile
+	configFile := defaultConfigFile
+
+	var commandOptions struct {
+		showUsage    bool
+		server       string
+		username     string
+		journals     commandOptionStringArray
+		passwordFile string
+	}
+
+	parseCommandLine := func() *Report {
+		programName := filepath.Base(os.Args[0])
+		flags := flag.NewFlagSet(programName, flag.ContinueOnError)
+		flags.SetOutput(os.Stderr)
+
+		// Avoid printing full usage on command line errors
+		flags.Usage = func() { }
+
+		// Extract `` from the long option usage to construct short usage
+		findUsageTypeRe := regexp.MustCompile("`[^`]+`")
+		shorthand := func(longOption, usage string) string {
+			return fmt.Sprintf("shorthand for -%s %s", longOption, findUsageTypeRe.FindString(usage))
+		}
+		addBoolOpt := func(ptr *bool, shortOption rune, longOption, usage string) {
+			flags.BoolVar(ptr, longOption, false, usage)
+			flags.BoolVar(ptr, string(shortOption), false, shorthand(longOption, usage))
+		}
+		addStrOpt := func(ptr *string, shortOption rune, longOption, defaultValue, usage string) {
+			flags.StringVar(ptr, longOption, defaultValue, usage)
+			flags.StringVar(ptr, string(shortOption), defaultValue, shorthand(longOption, usage))
+		}
+		addValueOpt := func(ptr flag.Value, shortOption rune, longOption, usage string) {
+			flags.Var(ptr, longOption, usage)
+			flags.Var(ptr, string(shortOption), shorthand(longOption, usage))
+		}
+		addBoolOpt(&commandOptions.showUsage, 'h', "help", "print usage on stdout and exit")
+		addStrOpt(&commandOptions.server, 's', "server", defaultLJServer, "LJ `server`")
+		addStrOpt(&commandOptions.username, 'u', "username", "", "LJ `username`")
+		addStrOpt(
+			&commandOptions.passwordFile, 'p', "password-file", "",
+			"`path` to file with LJ user password, use '-' to read from stdin (password will be echoed)",
+		)
+		addValueOpt(&commandOptions.journals, 'j', "journal", "add `journal` to the list of journals to archive. If none are given, use LJ username")
+
+		if err := flags.Parse(os.Args[1:]); err != nil {
+			log("Try '%s --help' for more information", programName)
+			os.Exit(1)
+		} else if commandOptions.showUsage {
+			flags.SetOutput(os.Stdout)
+			fmt.Printf("Usage: %s [OPTION]...\n\nOption summary:\n", programName)
+			flags.PrintDefaults()
+			os.Exit(0)
+		}
+		if flags.NArg() != 0 {
+			return ReportMsg("Unexpected command line argument %s", flags.Arg(0))
+		}
+		return nil
+	}
+
+	if r := parseCommandLine(); r != nil {
+		return nil, r
 	}
 
 	configBytes, err := ioutil.ReadFile(configFile)
 	if err != nil {
-		return nil, WrapErr(err, "failed to read %s", configFile)
+		if !os.IsNotExist(err) {
+			return nil, WrapErr(err, "failed to read %s", configFile)
+		}
 	}
 
 	var storedConfig struct {
+		XMLName      xml.Name `xml:"ljdump"`
 		Server       string   `xml:"server"`
 		Username     string   `xml:"username"`
 		Journals     []string `xml:"journal"`
 		Password     string   `xml:"password"`
 		PasswordFile string   `xml:"passwordFile"`
 	}
-	if err = xml.Unmarshal(configBytes, &storedConfig); err != nil {
-		return nil, WrapErr(err, "failed to parse %s as JSON", configFile)
+	if len(configBytes) != 0 {
+		if err = xml.Unmarshal(configBytes, &storedConfig); err != nil {
+			return nil, WrapErr(err, "failed to parse %s as ljdump config XML", configFile)
+		}
+		if storedConfig.Password != "" && storedConfig.PasswordFile != "" {
+			return nil, ReportMsg(
+				"Only one of <password>, <passwordFile> can be specified in %s",
+				configFile,
+			)
+		}
 	}
 
 	var config = new(Config)
 
-	config.server = storedConfig.Server
+	config.server = commandOptions.server
+	if config.server == "" {
+		config.server = storedConfig.Server
+	}
 	if config.server != "" {
 		if strings.HasSuffix(config.server, serverUrlCompabilitySuffix) {
 			config.server = storedConfig.Server[0 : len(config.server)-len(serverUrlCompabilitySuffix)]
@@ -170,48 +253,60 @@ func loadConfig() (*Config, *Report) {
 		config.server = defaultLJServer
 	}
 
-	config.username = storedConfig.Username
+	config.username = commandOptions.username
 	if config.username == "" {
-		return nil, ReportMsg("username must be specified in %s", configFile)
+		config.username = storedConfig.Username
+	}
+	if config.username == "" {
+		return nil, ReportMsg("username must be specified either on command line or in %s", configFile)
 	}
 
-	if len(storedConfig.Journals) == 0 {
+	if len(commandOptions.journals) != 0 {
+		config.journals = commandOptions.journals
+	} else {
+		config.journals = storedConfig.Journals
+	}
+	if len(config.journals) == 0 {
 		config.journals = []string{config.username}
 	} else {
-		for i, journal := range storedConfig.Journals {
+		for i, journal := range config.journals {
 			if journal == "" {
 				return nil, ReportMsg("journal %d is empty string", i+1)
 			}
 		}
-		config.journals = storedConfig.Journals
 	}
 
-	config.password = storedConfig.Password
-	if config.password != "" {
-		if storedConfig.PasswordFile != "" {
-			return nil, ReportMsg(
-				"Only one of <password>, <passwordFile> can be specified in the config %s",
-				configFile,
-			)
-		}
-	} else {
-		passwordFile := os.Getenv("LJDUMP_PASSWORD_FILE")
+	// password-file option on the command line take precedence over
+	// both password and passwordFile in the config.
+	passwordFile := commandOptions.passwordFile
+	if passwordFile == "" {
+		config.password = storedConfig.Password
+	}
+	if config.password == "" {
 		if passwordFile == "" {
-			passwordFile = storedConfig.PasswordFile
-			if passwordFile != "" && !filepath.IsAbs(passwordFile){
-				passwordFile = filepath.Join(filepath.Dir(configFile), passwordFile)
+			passwordFile = os.Getenv("LJDUMP_PASSWORD_FILE")
+			if passwordFile == "" {
+				passwordFile = storedConfig.PasswordFile
+				if passwordFile != "" && !filepath.IsAbs(passwordFile) {
+					passwordFile = filepath.Join(filepath.Dir(configFile), passwordFile)
+				}
 			}
 		}
 		if passwordFile == "" {
 			return nil, ReportMsg(
-				"The password was not specified in %s and neither <passwordFile>"+
-					" nor LJDUMP_PASSWORD_FILE environment variable were given",
+				"the password was not specified in the config file %s and no password file path was given on command line, in LJDUMP_PASSWORD_FILE environment variable or the config file",
 				configFile,
 			)
+		}
+		if passwordFile == "-" {
+			fmt.Print("Enter lj user password (it will be echoed): ")
 		}
 		passwordBytes, err := readFileFirstLine(passwordFile)
 		if err != nil {
 			return nil, WrapErr(err, "failed to read password from %s", passwordFile)
+		}
+		if len(passwordBytes) == 0 {
+			return nil, WrapErr(err, "first line with password in %s was empty", passwordFile)
 		}
 		config.password = string(passwordBytes)
 	}
