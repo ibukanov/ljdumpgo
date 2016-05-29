@@ -124,6 +124,9 @@ const defaultConfigFile = "ljdump.config"
 const accountDataDirName = "account.data"
 const accountDataDBFileName = "account.linedb"
 
+const serverUrlCompabilitySuffix = "/interface/xmlrpc"
+const defaultLJServer = "http://livejournal.com"
+
 type Config struct {
 	server         string
 	username       string
@@ -131,13 +134,6 @@ type Config struct {
 	password       string
 	dumpDir        string
 	accountDataDir string
-}
-
-type StoredConfig struct {
-	Server   string   `xml:"server"`
-	Username string   `xml:"username"`
-	Journals []string `xml:"journal"`
-	Password string   `xml:"password"`
 }
 
 func loadConfig() (*Config, *Report) {
@@ -149,29 +145,35 @@ func loadConfig() (*Config, *Report) {
 
 	configBytes, err := ioutil.ReadFile(configFile)
 	if err != nil {
-		return nil, WrapErr(err, "failed to read %s", defaultConfigFile)
+		return nil, WrapErr(err, "failed to read %s", configFile)
 	}
 
-	var storedConfig StoredConfig
-	err = xml.Unmarshal(configBytes, &storedConfig)
-	if err != nil {
-		return nil, WrapErr(err, "failed to parse %s as JSON", defaultConfigFile)
+	var storedConfig struct {
+		Server       string   `xml:"server"`
+		Username     string   `xml:"username"`
+		Journals     []string `xml:"journal"`
+		Password     string   `xml:"password"`
+		PasswordFile string   `xml:"passwordFile"`
 	}
+	if err = xml.Unmarshal(configBytes, &storedConfig); err != nil {
+		return nil, WrapErr(err, "failed to parse %s as JSON", configFile)
+	}
+
 	var config = new(Config)
 
-	const urlCompabilitySuffix = "/interface/xmlrpc"
-	if strings.HasSuffix(storedConfig.Server, urlCompabilitySuffix) {
-		storedConfig.Server = storedConfig.Server[0 : len(storedConfig.Server)-len(urlCompabilitySuffix)]
-	}
-	if storedConfig.Server == "" {
-		return nil, ReportMsg("server is empty string")
-	}
 	config.server = storedConfig.Server
-
-	if storedConfig.Username == "" {
-		return nil, ReportMsg("username is empty string")
+	if config.server != "" {
+		if strings.HasSuffix(config.server, serverUrlCompabilitySuffix) {
+			config.server = storedConfig.Server[0 : len(config.server)-len(serverUrlCompabilitySuffix)]
+		}
+	} else {
+		config.server = defaultLJServer
 	}
+
 	config.username = storedConfig.Username
+	if config.username == "" {
+		return nil, ReportMsg("username must be specified in %s", configFile)
+	}
 
 	if len(storedConfig.Journals) == 0 {
 		config.journals = []string{config.username}
@@ -184,34 +186,65 @@ func loadConfig() (*Config, *Report) {
 		config.journals = storedConfig.Journals
 	}
 
-	if storedConfig.Password != "" {
-		config.password = storedConfig.Password
-	} else if passwordFile := os.Getenv("LJDUMP_PASSWORD_FILE"); passwordFile != "" {
-		var passwordBytes []byte
-		if passwordFile == "-" {
-			log("reading password from stdin (on tty it is echoed)")
-			passwordBytes, err = ioutil.ReadAll(os.Stdin)
-			if err != nil {
-				return nil, WrapErr(err, "failed to read password from stdin")
-			}
-		} else {
-			passwordBytes, err = ioutil.ReadFile(passwordFile)
-			if err != nil {
-				return nil, WrapErr(err, "failed to read password from %s", passwordFile)
+	config.password = storedConfig.Password
+	if config.password != "" {
+		if storedConfig.PasswordFile != "" {
+			return nil, ReportMsg(
+				"Only one of <password>, <passwordFile> can be specified in the config %s",
+				configFile,
+			)
+		}
+	} else {
+		passwordFile := os.Getenv("LJDUMP_PASSWORD_FILE")
+		if passwordFile == "" {
+			passwordFile = storedConfig.PasswordFile
+			if passwordFile != "" && !filepath.IsAbs(passwordFile){
+				passwordFile = filepath.Join(filepath.Dir(configFile), passwordFile)
 			}
 		}
-		config.password = strings.TrimRight(string(passwordBytes), "\r\n")
-	} else {
-		return nil, ReportMsg(
-			"%s is without <password> and LJDUMP_PASSWORD_FILE environmnet variable is not specified",
-			configFile,
-		)
+		if passwordFile == "" {
+			return nil, ReportMsg(
+				"The password was not specified in %s and neither <passwordFile>"+
+					" nor LJDUMP_PASSWORD_FILE environment variable were given",
+				configFile,
+			)
+		}
+		passwordBytes, err := readFileFirstLine(passwordFile)
+		if err != nil {
+			return nil, WrapErr(err, "failed to read password from %s", passwordFile)
+		}
+		config.password = string(passwordBytes)
 	}
 
 	config.dumpDir = "."
 	config.accountDataDir = filepath.Join(config.dumpDir, accountDataDirName)
 
 	return config, nil
+}
+
+// When filePath is -, read stdin
+func readFileFirstLine(filePath string) ([]byte, error) {
+	var f *os.File
+	var err error
+	if filePath == "-" {
+		f = os.Stdin
+	} else {
+		f, err = os.Open(filePath)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var scanner = bufio.NewScanner(f)
+	var lineBytes []byte
+	if scanner.Scan() {
+		lineBytes = scanner.Bytes()
+	}
+	err = scanner.Err()
+	if f != os.Stdin {
+		err = fuseErr(err, f.Close())
+	}
+	return lineBytes, err
 }
 
 type journalContext struct {
@@ -262,9 +295,9 @@ type journalDB struct {
 
 type sortIds []int64
 
-func (a sortIds) Len() int { return len(a) }
+func (a sortIds) Len() int           { return len(a) }
 func (a sortIds) Less(i, j int) bool { return a[i] < a[j] }
-func (a sortIds) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
+func (a sortIds) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 
 func parseUserId(idstr string) (UserId, error) {
 	if idstr == "" {
@@ -369,11 +402,11 @@ func writeJournalDB(jcx *journalContext) *Report {
 		e.AddInt64(userId).AddString(jcx.db.userMap[UserId(userId)]).EndRow()
 	}
 	e.EndTable()
-	
+
 	e.EmptyLine()
 	e.Comment("map from comment-id to (poster-id state)")
 	commentIds := make(sortIds, 0, len(jcx.db.commentMap))
-	for commentId := range(jcx.db.commentMap) {
+	for commentId := range jcx.db.commentMap {
 		commentIds = append(commentIds, int64(commentId))
 	}
 	sort.Sort(commentIds)
@@ -383,7 +416,7 @@ func writeJournalDB(jcx *journalContext) *Report {
 		e.AddInt64(commentId).AddInt64(int64(commentMeta.posterId)).AddString(commentMeta.state).EndRow()
 	}
 	e.EndTable()
-	
+
 	var dbpath = filepath.Join(jcx.dir, journalDBFileName)
 	if err := writeFileTempRename(dbpath, e.GetBytes()); err != nil {
 		return WrapErr(err, "failed to write journal db file %s", dbpath)
@@ -417,7 +450,7 @@ func readJournalDB(jcx *journalContext) *Report {
 	} else {
 		jcx.db.userMap = make(map[UserId]string)
 		jcx.db.commentMap = make(map[CommentId]commentMeta)
-		
+
 		d := linedb.NewByteDecoder(dbdata)
 		for d.NextItem() {
 			switch d.ItemKind {
@@ -434,7 +467,7 @@ func readJournalDB(jcx *journalContext) *Report {
 					case "commentMeta":
 						jcx.db.commentMap[CommentId(d.GetInt64())] = commentMeta{
 							posterId: UserId(d.GetInt64()),
-							state: d.GetString(),
+							state:    d.GetString(),
 						}
 					}
 				}

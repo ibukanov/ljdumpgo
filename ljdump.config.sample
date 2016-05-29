@@ -5,6 +5,15 @@
   <!-- LiveJournal user and password -->     
   <username>ljuser</username>
   <password>foobar</password>
+
+  <!--
+      Instead of the specifying the password here the path of a file
+      with the password can be given. The file must contain the
+      password text on the first line. If the path is relative, it is
+      interpreted relative to the dir containing the config.
+
+      <passwordFile>path-to-file-with-password</passwordFile>
+  -->
   
   <!--
       List of journals to archive. If no journals are given, the

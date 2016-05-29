@@ -8,7 +8,7 @@ The software should be considered alpha-version quality and is used with extreme
 ## Invocation
 Create a directory where to store the archive and create a config file named `ljdump.config` there as described in the [sample file](ljdump.config.sample). Then run compiled ljdumpgo binary from that directory.
 
-To specify the password separately from the config file create a file with single line containing the password and then omit `<password>` in `ljdump.config` and set the environment variable LJDUMP_PASSWORD_FILE to the path of that file.
+To specify the password separately from the config file create a file with the password on its first line and then either add `<passwordFile>` to `ljdump.config` or set the environment variable `LJDUMP_PASSWORD_FILE` with the location of the password file.
 
 Archive of each journal is stored in the accordingly named subdirectory of the main directory. In addition userpics and their keywords are stored in the subdirectory `account.data`.
 
