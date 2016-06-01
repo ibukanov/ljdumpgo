@@ -931,7 +931,7 @@ func (session *ljSession) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Set login and agent headers. Doing it here also avoids
 	// https://github.com/golang/go/issues/4800
 
-	req.Header.Set("User-Agent", "https://github.com/ibukanov/ljdumpgo; igor@mir2.org")
+	req.Header.Set("User-Agent", "Bot - https://github.com/ibukanov/ljdumpgo; igor@mir2.org")
 	if session.loginCookie != "" {
 		req.Header.Set("Cookie", "ljsession="+session.loginCookie)
 		req.Header.Set("X-LJ-Auth", "cookie")
@@ -943,7 +943,7 @@ func (session *ljSession) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	// rate-limit number of requests to avoid blacklisting by IP
-	const minimalTimeBetweenRequests = 200 * time.Millisecond
+	const minimalTimeBetweenRequests = 250 * time.Millisecond
 	newRequestTime := time.Now()
 	if !session.lastRequestTime.IsZero() {
 		sinceLastRequest := newRequestTime.Sub(session.lastRequestTime)
