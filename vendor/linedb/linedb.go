@@ -151,7 +151,19 @@ func (e *Encoder) AddInt64(i int64) *Encoder {
 
 func (e *Encoder) AddString(s string) *Encoder {
 	e.beforeValueWrite()
-	e.buffer = strconv.AppendQuote(e.buffer, s)
+	shouldQuote := true
+	if s != "" {
+		firstRune, _ := utf8.DecodeRuneInString(s)
+		if unicode.IsLetter(firstRune) || firstRune == '_' {
+			if strings.IndexFunc(s, unicode.IsSpace) < 0 {
+				e.buffer = append(e.buffer, s...)
+				shouldQuote = false
+			}
+		}
+	}
+	if shouldQuote {
+		e.buffer = strconv.AppendQuote(e.buffer, s)
+	}
 	e.afterValueWrite()
 	return e
 }
@@ -202,6 +214,7 @@ type Decoder struct {
 	currentLine  []byte
 	insideScalar bool
 	insideRow    bool
+	atRowStart   bool
 	rowCounter   int
 }
 
@@ -271,7 +284,11 @@ func (d *Decoder) NextRow() bool {
 	if d.ItemKind != TableItem {
 		panic("call outside table context")
 	}
-	if len(d.currentLine) != 0 {
+
+	// If the current line is not read report an error unless we are
+	// at the start of the first item. This allows to skip unknown for
+	// application tables.
+	if len(d.currentLine) != 0 && !d.atRowStart {
 		d.error = fmt.Errorf("Unread row element")
 		return false
 	}
@@ -291,6 +308,7 @@ func (d *Decoder) NextRow() bool {
 		return false
 	}
 	d.insideRow = true
+	d.atRowStart = true
 	d.rowCounter++
 	return true
 }
@@ -323,42 +341,43 @@ func (d *Decoder) GetString() string {
 	if !d.beforeValueRead() {
 		return ""
 	}
+	var s string
 	if d.currentLine[0] != '"' {
-		d.error = fmt.Errorf("String value must strt with \"")
-		return ""
-	}
-
-	// Find the terminating quote
-	i := 1
-	for {
-		if i == len(d.currentLine) {
-			d.error = fmt.Errorf("unterminated string literal")
+		firstRune, _ := utf8.DecodeRune(d.currentLine)
+		if !unicode.IsLetter(firstRune) && firstRune != '_' {
+			d.error = fmt.Errorf("String values must strt with unless they starts with letter or underscore")
 			return ""
 		}
-		if d.currentLine[i] == '"' {
-			break
-		}
-		if d.currentLine[i] == '\\' {
-			i++
+		s = string(d.nextCharsWithoutSpace())
+	} else {
+		// Find the terminating quote
+		i := 1
+		for {
 			if i == len(d.currentLine) {
 				d.error = fmt.Errorf("unterminated string literal")
 				return ""
 			}
+			if d.currentLine[i] == '"' {
+				break
+			}
+			if d.currentLine[i] == '\\' {
+				i++
+				if i == len(d.currentLine) {
+					d.error = fmt.Errorf("unterminated string literal")
+					return ""
+				}
+			}
+			_, n := utf8.DecodeRune(d.currentLine[i:])
+			i += n
 		}
-		r, n := utf8.DecodeRune(d.currentLine[i:])
-		if r == utf8.RuneError {
-			d.error = fmt.Errorf("string literal contains invalid utf-8, use \\x escape to represent arbitrary binary")
+		s = string(d.currentLine[0 : i+1])
+		d.currentLine = d.currentLine[i+1:]
+		d.skipLineWhitespace()
+
+		s, d.error = strconv.Unquote(s)
+		if d.error != nil {
 			return ""
 		}
-		i += n
-	}
-	s := string(d.currentLine[0 : i+1])
-	d.currentLine = d.currentLine[i+1:]
-	d.skipLineWhitespace()
-
-	s, d.error = strconv.Unquote(s)
-	if d.error != nil {
-		return ""
 	}
 	d.afterValueRead()
 	return s
@@ -378,6 +397,12 @@ func (d *Decoder) readLine() bool {
 			d.currentLine = d.data[0:i]
 			d.data = d.data[i+1:]
 		}
+		if !utf8.Valid(d.currentLine) {
+			d.error = fmt.Errorf(
+				"input is not a valid UTF8, use string with \\x escapes to encode arbitrary binary data",
+			)
+			return false
+		}
 		d.skipLineWhitespace()
 
 		// Ignore empty line or comments
@@ -392,13 +417,16 @@ func (d *Decoder) beforeValueRead() bool {
 	if d.error != nil {
 		return false
 	}
-	if !d.insideScalar && !d.insideRow {
+	if d.insideRow {
+		d.atRowStart = false
+	} else if !d.insideScalar {
 		panic("Can only be called for scalar or row")
 	}
 	if len(d.currentLine) == 0 {
 		d.error = fmt.Errorf("unexpected line end while looking for value")
 		return false
 	}
+	
 	return true
 }
 
