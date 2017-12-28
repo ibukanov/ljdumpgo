@@ -125,7 +125,7 @@ const accountDataDirName = "account.data"
 const accountDataDBFileName = "account.linedb"
 
 const serverUrlCompabilitySuffix = "/interface/xmlrpc"
-const defaultLJServer = "http://livejournal.com"
+const defaultLJServer = "https://livejournal.com"
 
 type Config struct {
 	server         string
